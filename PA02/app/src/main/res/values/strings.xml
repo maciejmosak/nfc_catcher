@@ -1,4 +1,8 @@
+<?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">PA02</string>
-    <string name="header">hababa</string>
+    <string name="hello">Hello World!</string>
+    <string name="app_name">NFC Writer</string>
+    <string name="write_to_tag">Re-write RFID</string>
+    <string name="rfid_content">Your RFID tag content</string>
+    <string name="header">In field below, you can read your scanned RFID content, or input content which will be written to tag (write text, push "Re-write RFID" button, touch your tag to device).</string>
 </resources>

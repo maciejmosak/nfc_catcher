@@ -1,8 +1,9 @@
 package pl.maciejdrukuje.pa02;
-import java.io.UnsupportedEncodingException;
-import java.util.Arrays;
+
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.app.PendingIntent;
+import android.content.DialogInterface;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.content.IntentFilter.MalformedMimeTypeException;
@@ -11,208 +12,262 @@ import android.nfc.NdefRecord;
 import android.nfc.NfcAdapter;
 import android.nfc.Tag;
 import android.nfc.tech.Ndef;
-import android.os.AsyncTask;
-import android.support.v7.app.AppCompatActivity;
+import android.nfc.tech.NdefFormatable;
 import android.os.Bundle;
+import android.os.Parcelable;
+import android.text.Editable;
+import android.text.TextWatcher;
 import android.util.Log;
 import android.view.View;
-import android.widget.Button;
-import android.widget.TextView;
+import android.widget.EditText;
 import android.widget.Toast;
 
+import java.io.IOException;
 
-public class MainActivity extends AppCompatActivity {
-   static String MIME_TEXT_PLAIN;
-    String TAG;
-    TextView header_text_view;
-    NfcAdapter rfid;
+public class MainActivity extends Activity {
+    private static final String TAG = "stickynotes";
+    private boolean mResumed = false;
+    private boolean mWriteMode = false;
+    NfcAdapter mNfcAdapter;
+    EditText mNote;
 
+    PendingIntent mNfcPendingIntent;
+    IntentFilter[] mWriteTagFilters;
+    IntentFilter[] mNdefExchangeFilters;
 
+    /** Called when the activity is first created. */
     @Override
-    protected void onCreate(Bundle savedInstanceState) {
+    public void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+        mNfcAdapter = NfcAdapter.getDefaultAdapter(this);
+
         setContentView(R.layout.activity_main);
-        header_text_view = (TextView)findViewById(R.id.header_view);
-        TAG = "NfcDemo";
-        MIME_TEXT_PLAIN = "text/plain";
-        rfid = NfcAdapter.getDefaultAdapter(this);
+        findViewById(R.id.write_tag).setOnClickListener(mTagWriter);
+        mNote = ((EditText) findViewById(R.id.note));
+        mNote.addTextChangedListener(mTextWatcher);
 
-        if (rfid == null) {
-            // Stop here, we definitely need NFC
-            Toast.makeText(this, "This device doesn't support NFC.", Toast.LENGTH_LONG).show();
-            finish();
-            return;
+        // Handle all of our received NFC intents in this activity.
+        mNfcPendingIntent = PendingIntent.getActivity(this, 0,
+                new Intent(this, getClass()).addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP), 0);
 
-        }
+        // Intent filters for reading a note from a tag or exchanging over p2p.
+        IntentFilter ndefDetected = new IntentFilter(NfcAdapter.ACTION_NDEF_DISCOVERED);
+        try {
+            ndefDetected.addDataType("text/plain");
+        } catch (MalformedMimeTypeException e) { }
+        mNdefExchangeFilters = new IntentFilter[] { ndefDetected };
 
-        if (!rfid.isEnabled()) {
-            header_text_view.setText("NFC is disabled.");
-        } else {
-            header_text_view.setText(R.string.header);
-        }
-
-        handleIntent(getIntent());
+        // Intent filters for writing to a tag
+        IntentFilter tagDetected = new IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED);
+        mWriteTagFilters = new IntentFilter[] { tagDetected };
     }
+
     @Override
     protected void onResume() {
         super.onResume();
-
-        /**
-         * It's important, that the activity is in the foreground (resumed). Otherwise
-         * an IllegalStateException is thrown.
-         */
-        setupForegroundDispatch(this, rfid);
+        mResumed = true;
+        // Sticky notes received from Android
+        if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(getIntent().getAction())) {
+            NdefMessage[] messages = getNdefMessages(getIntent());
+            byte[] payload = messages[0].getRecords()[0].getPayload();
+            setNoteBody(new String(payload));
+            setIntent(new Intent()); // Consume this intent.
+        }
+        enableNdefExchangeMode();
     }
 
     @Override
     protected void onPause() {
-        /**
-         * Call this before onPause, otherwise an IllegalArgumentException is thrown as well.
-         */
-        stopForegroundDispatch(this, rfid);
-
         super.onPause();
+        mResumed = false;
+        mNfcAdapter.disableForegroundNdefPush(this);
     }
 
     @Override
     protected void onNewIntent(Intent intent) {
-        /**
-         * This method gets called, when a new Intent gets associated with the current activity instance.
-         * Instead of creating a new activity, onNewIntent will be called. For more information have a look
-         * at the documentation.
-         *
-         * In our case this method gets called, when the user attaches a Tag to the device.
-         */
-        handleIntent(intent);
-    }
-    public void wololo (View v){
-        Button button = (Button) v;
-        String header_text = v.getTag().toString();
-        header_text_view.setText(header_text);
+        // NDEF exchange mode
+        if (!mWriteMode && NfcAdapter.ACTION_NDEF_DISCOVERED.equals(intent.getAction())) {
+            NdefMessage[] msgs = getNdefMessages(intent);
+            promptForContent(msgs[0]);
+        }
 
-    }
-    private void handleIntent(Intent intent) {
-        String action = intent.getAction();
-        if (NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action)) {
-
-            String type = intent.getType();
-            if (MIME_TEXT_PLAIN.equals(type)) {
-
-                Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
-                new NdefReaderTask().execute(tag);
-
-            } else {
-                Log.d(TAG, "Wrong mime type: " + type);
-            }
-        } else if (NfcAdapter.ACTION_TECH_DISCOVERED.equals(action)) {
-
-            // In case we would still use the Tech Discovered Intent
-            Tag tag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
-            String[] techList = tag.getTechList();
-            String searchedTech = Ndef.class.getName();
-
-            for (String tech : techList) {
-                if (searchedTech.equals(tech)) {
-                    new NdefReaderTask().execute(tag);
-                    break;
-                }
-            }
+        // Tag writing mode
+        if (mWriteMode && NfcAdapter.ACTION_TAG_DISCOVERED.equals(intent.getAction())) {
+            Tag detectedTag = intent.getParcelableExtra(NfcAdapter.EXTRA_TAG);
+            writeTag(getNoteAsNdef(), detectedTag);
         }
     }
-    /**
-     * Background task for reading the data. Do not block the UI thread while reading.
-     *
-     * @author Ralf Wondratschek
-     *
-     */
-    private class NdefReaderTask extends AsyncTask<Tag, Void, String> {
+
+    private TextWatcher mTextWatcher = new TextWatcher() {
 
         @Override
-        protected String doInBackground(Tag... params) {
-            Tag tag = params[0];
+        public void onTextChanged(CharSequence arg0, int arg1, int arg2, int arg3) {
 
-            Ndef ndef = Ndef.get(tag);
-            if (ndef == null) {
-                // NDEF is not supported by this Tag.
-                return null;
+        }
+
+        @Override
+        public void beforeTextChanged(CharSequence arg0, int arg1, int arg2, int arg3) {
+
+        }
+
+        @Override
+        public void afterTextChanged(Editable arg0) {
+            if (mResumed) {
+                mNfcAdapter.enableForegroundNdefPush(MainActivity.this, getNoteAsNdef());
             }
+        }
+    };
 
-            NdefMessage ndefMessage = ndef.getCachedNdefMessage();
+    private View.OnClickListener mTagWriter = new View.OnClickListener() {
+        @Override
+        public void onClick(View arg0) {
+            // Write to a tag for as long as the dialog is shown.
+            disableNdefExchangeMode();
+            enableTagWriteMode();
 
-            NdefRecord[] records = ndefMessage.getRecords();
-            for (NdefRecord ndefRecord : records) {
-                if (ndefRecord.getTnf() == NdefRecord.TNF_WELL_KNOWN && Arrays.equals(ndefRecord.getType(), NdefRecord.RTD_TEXT)) {
-                    try {
-                        return readText(ndefRecord);
-                    } catch (UnsupportedEncodingException e) {
-                        Log.e(TAG, "Unsupported Encoding", e);
+            new AlertDialog.Builder(MainActivity.this).setTitle("Touch tag to write")
+                    .setOnCancelListener(new DialogInterface.OnCancelListener() {
+                        @Override
+                        public void onCancel(DialogInterface dialog) {
+                            disableTagWriteMode();
+                            enableNdefExchangeMode();
+                        }
+                    }).create().show();
+        }
+    };
+
+    private void promptForContent(final NdefMessage msg) {
+        new AlertDialog.Builder(this).setTitle("Replace current content?")
+                .setPositiveButton("Yes", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface arg0, int arg1) {
+                        String body = new String(msg.getRecords()[0].getPayload());
+                        setNoteBody(body);
                     }
+                })
+                .setNegativeButton("No", new DialogInterface.OnClickListener() {
+                    @Override
+                    public void onClick(DialogInterface arg0, int arg1) {
+
+                    }
+                }).show();
+    }
+
+    private void setNoteBody(String body) {
+        Editable text = mNote.getText();
+        text.clear();
+        text.append(body);
+    }
+
+    private NdefMessage getNoteAsNdef() {
+        byte[] textBytes = mNote.getText().toString().getBytes();
+        NdefRecord textRecord = new NdefRecord(NdefRecord.TNF_MIME_MEDIA, "text/plain".getBytes(),
+                new byte[] {}, textBytes);
+        return new NdefMessage(new NdefRecord[] {
+                textRecord
+        });
+    }
+
+    NdefMessage[] getNdefMessages(Intent intent) {
+        // Parse the intent
+        NdefMessage[] msgs = null;
+        String action = intent.getAction();
+        if (NfcAdapter.ACTION_TAG_DISCOVERED.equals(action)
+                || NfcAdapter.ACTION_NDEF_DISCOVERED.equals(action)) {
+            Parcelable[] rawMsgs = intent.getParcelableArrayExtra(NfcAdapter.EXTRA_NDEF_MESSAGES);
+            if (rawMsgs != null) {
+                msgs = new NdefMessage[rawMsgs.length];
+                for (int i = 0; i < rawMsgs.length; i++) {
+                    msgs[i] = (NdefMessage) rawMsgs[i];
+                }
+            } else {
+                // Unknown tag type
+                byte[] empty = new byte[] {};
+                NdefRecord record = new NdefRecord(NdefRecord.TNF_UNKNOWN, empty, empty, empty);
+                NdefMessage msg = new NdefMessage(new NdefRecord[] {
+                        record
+                });
+                msgs = new NdefMessage[] {
+                        msg
+                };
+            }
+        } else {
+            Log.d(TAG, "Unknown intent.");
+            finish();
+        }
+        return msgs;
+    }
+
+    private void enableNdefExchangeMode() {
+        mNfcAdapter.enableForegroundNdefPush(MainActivity.this, getNoteAsNdef());
+        mNfcAdapter.enableForegroundDispatch(this, mNfcPendingIntent, mNdefExchangeFilters, null);
+    }
+
+    private void disableNdefExchangeMode() {
+        mNfcAdapter.disableForegroundNdefPush(this);
+        mNfcAdapter.disableForegroundDispatch(this);
+    }
+
+    private void enableTagWriteMode() {
+        mWriteMode = true;
+        IntentFilter tagDetected = new IntentFilter(NfcAdapter.ACTION_TAG_DISCOVERED);
+        mWriteTagFilters = new IntentFilter[] {
+                tagDetected
+        };
+        mNfcAdapter.enableForegroundDispatch(this, mNfcPendingIntent, mWriteTagFilters, null);
+    }
+
+    private void disableTagWriteMode() {
+        mWriteMode = false;
+        mNfcAdapter.disableForegroundDispatch(this);
+    }
+
+    boolean writeTag(NdefMessage message, Tag tag) {
+        int size = message.toByteArray().length;
+
+        try {
+            Ndef ndef = Ndef.get(tag);
+            if (ndef != null) {
+                ndef.connect();
+
+                if (!ndef.isWritable()) {
+                    toast("Tag is read-only.");
+                    return false;
+                }
+                if (ndef.getMaxSize() < size) {
+                    toast("Tag capacity is " + ndef.getMaxSize() + " bytes, message is " + size
+                            + " bytes.");
+                    return false;
+                }
+
+                ndef.writeNdefMessage(message);
+                toast("Wrote message to pre-formatted tag.");
+                return true;
+            } else {
+                NdefFormatable format = NdefFormatable.get(tag);
+                if (format != null) {
+                    try {
+                        format.connect();
+                        format.format(message);
+                        toast("Formatted tag and wrote message");
+                        return true;
+                    } catch (IOException e) {
+                        toast("Failed to format tag.");
+                        return false;
+                    }
+                } else {
+                    toast("Tag doesn't support NDEF.");
+                    return false;
                 }
             }
-
-            return null;
+        } catch (Exception e) {
+            toast("Failed to write tag");
         }
 
-        private String readText(NdefRecord record) throws UnsupportedEncodingException {
-        /*
-         * See NFC forum specification for "Text Record Type Definition" at 3.2.1
-         *
-         * http://www.nfc-forum.org/specs/
-         *
-         * bit_7 defines encoding
-         * bit_6 reserved for future use, must be 0
-         * bit_5..0 length of IANA language code
-         */
-
-            byte[] payload = record.getPayload();
-
-            // Get the Text Encoding
-            String textEncoding = ((payload[0] & 128) == 0) ? "UTF-8" : "UTF-16";
-
-            // Get the Language Code
-            int languageCodeLength = payload[0] & 0063;
-
-            // String languageCode = new String(payload, 1, languageCodeLength, "US-ASCII");
-            // e.g. "en"
-
-            // Get the Text
-            return new String(payload, languageCodeLength + 1, payload.length - languageCodeLength - 1, textEncoding);
-        }
-
-        @Override
-        protected void onPostExecute(String result) {
-            if (result != null) {
-                header_text_view.setText("Read content: " + result);
-            }
-        }
-    }
-    public static void setupForegroundDispatch(final Activity activity, NfcAdapter adapter) {
-        final Intent intent = new Intent(activity.getApplicationContext(), activity.getClass());
-        intent.setFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP);
-
-        final PendingIntent pendingIntent = PendingIntent.getActivity(activity.getApplicationContext(), 0, intent, 0);
-
-        IntentFilter[] filters = new IntentFilter[1];
-        String[][] techList = new String[][]{};
-
-        // Notice that this is the same filter as in our manifest.
-        filters[0] = new IntentFilter();
-        filters[0].addAction(NfcAdapter.ACTION_NDEF_DISCOVERED);
-        filters[0].addCategory(Intent.CATEGORY_DEFAULT);
-        try {
-            filters[0].addDataType(MIME_TEXT_PLAIN);
-        } catch (MalformedMimeTypeException e) {
-            throw new RuntimeException("Check your mime type.");
-        }
-
-        adapter.enableForegroundDispatch(activity, pendingIntent, filters, techList);
+        return false;
     }
 
-    /**
-     * @param activity The corresponding {@link BaseActivity} requesting to stop the foreground dispatch.
-     * @param adapter The {@link NfcAdapter} used for the foreground dispatch.
-     */
-    public static void stopForegroundDispatch(final Activity activity, NfcAdapter adapter) {
-        adapter.disableForegroundDispatch(activity);
+    private void toast(String text) {
+        Toast.makeText(this, text, Toast.LENGTH_SHORT).show();
     }
 }
