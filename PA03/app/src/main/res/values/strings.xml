@@ -1,0 +1,9 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="hello">Hello World!</string>
+    <string name="app_name">NFC Catcher</string>
+    <string name="header">Welcome in NFC Catcher game. You are getting one point per every tag
+        (you cannot get multiple points from one tag, sorry :P).
+        Start picking RFID tags to get points!</string>
+    <string name="points">0 :(</string>
+</resources>
